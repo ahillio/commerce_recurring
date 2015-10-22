@@ -1,0 +1,159 @@
+diff --git a/commerce_recurring.module b/commerce_recurring.module
+index 464dcae..a293ccf 100644
+--- a/commerce_recurring.module
++++ b/commerce_recurring.module
+@@ -394,35 +394,51 @@ function commerce_recurring_new(array $values = array()) {
+  *   Commerce product associated with the recurring entity.
+  * @param $fixed_price
+  * @param $quantity
++ * @param $start_date
++ * @param $due_date
++ * @param $end_date
+  *
+  * @return entity $recurring_entity
+  */
+-function commerce_recurring_new_from_product($order, $product, $fixed_price, $quantity) {
++function commerce_recurring_new_from_product($order, $product, $fixed_price, $quantity, $start_date = NULL, $due_date = NULL, $end_date = NULL) {
+   if (empty($product)) {
+     return;
+   }
++
+   $product_wrapper = entity_metadata_wrapper('commerce_product', $product);
+   $date = new DateObject();
++  // If we're specifying a start date, adapt the date object to be based on that
++  // timestamp.
++  if (!empty($start_date)) {
++    $date->setTimestamp($start_date);
++  }
+   $start_date = $date->getTimestamp();
+-  $due_date = clone $date;
+ 
+-  if (!empty($product->commerce_recurring_ini_period)) {
+-    $initial_interval = $product_wrapper->commerce_recurring_ini_period->value();
+-  }
+-  if (empty($initial_interval)) {
+-    if (!empty($product->commerce_recurring_rec_period)) {
+-      $initial_interval = $product_wrapper->commerce_recurring_rec_period->value();
++  // If we don't have a due date, calculate it from the interval.
++  if (empty($due_date)) {
++    $due_date = clone $date;
++
++    if (!empty($product->commerce_recurring_ini_period)) {
++      $initial_interval = $product_wrapper->commerce_recurring_ini_period->value();
+     }
++    if (empty($initial_interval)) {
++      if (!empty($product->commerce_recurring_rec_period)) {
++        $initial_interval = $product_wrapper->commerce_recurring_rec_period->value();
++      }
++    }
++    if (!empty($initial_interval)) {
++      interval_apply_interval($due_date, $initial_interval, TRUE);
++    }
++    $due_date = $due_date->getTimestamp();
+   }
+-  if (!empty($initial_interval)) {
+-    interval_apply_interval($due_date, $initial_interval, TRUE);
+-  }
+-  $due_date = $due_date->getTimestamp();
+ 
+-  if (!empty($product->commerce_recurring_end_period)) {
+-    $end_interval = $product_wrapper->commerce_recurring_end_period->value();
+-    interval_apply_interval($date, $end_interval, TRUE);
+-    $end_date = $date->getTimestamp();
++  // If we don't have a end date, calculate it from the interval.
++  if (empty($end_date)) {
++    if (!empty($product->commerce_recurring_end_period)) {
++      $end_interval = $product_wrapper->commerce_recurring_end_period->value();
++      interval_apply_interval($date, $end_interval, TRUE);
++      $end_date = $date->getTimestamp();
++    }
+   }
+ 
+   $values = array(
+diff --git a/commerce_recurring.rules.inc b/commerce_recurring.rules.inc
+index 5fe21bf..87d0983 100644
+--- a/commerce_recurring.rules.inc
++++ b/commerce_recurring.rules.inc
+@@ -235,6 +235,21 @@ function commerce_recurring_rules_action_info() {
+         'type' => 'decimal',
+         'label' => t('Quantity'),
+       ),
++      'start_date' => array(
++        'type' => 'date',
++        'label' => t('Start date'),
++        'optional' => TRUE,
++      ),
++      'due_date' => array(
++        'type' => 'date',
++        'label' => t('Due date'),
++        'optional' => TRUE,
++      ),
++      'end_date' => array(
++        'type' => 'date',
++        'label' => t('End date'),
++        'optional' => TRUE,
++      ),
+     ),
+     'group' => t('Commerce recurring'),
+     'callbacks' => array(
+@@ -342,7 +357,7 @@ function commerce_recurring_rules_set_price($line_item, $listing_price, $initial
+             'data' => $listing_price['data'],
+           );
+         }
+-        //@TODO: // Case: Initial price.
++        //@TODO: Case: Initial price.
+         //@TODO: Fix cart listing when displaying the cart with the product.
+       }
+ 
+@@ -428,14 +443,14 @@ function commerce_recurring_rules_provide_order_properties($recurring_entity) {
+ /**
+  * Generate the recurring entity using the product information.
+  */
+-function commerce_recurring_rules_generate_recurring_product($order, $line_item, $fixed_price, $quantity) {
++function commerce_recurring_rules_generate_recurring_product($order, $line_item, $fixed_price, $quantity, $start_date = NULL, $due_date = NULL, $end_date = NULL) {
+   $line_item_wrapper = entity_metadata_wrapper('commerce_line_item', $line_item);
+   $product_wrapper = $line_item_wrapper->commerce_product;
+   $product = $product_wrapper->value();
+ 
+   // We need to check if there's already an order with that recurring entity.
+   if (empty($order->data['recurring_entity'])) {
+-    $recurring_entity = commerce_recurring_new_from_product($order, $product, $fixed_price, $quantity);
++    $recurring_entity = commerce_recurring_new_from_product($order, $product, $fixed_price, $quantity, $start_date, $due_date, $end_date);
+   }
+   else {
+     $recurring_entity = entity_load_single('commerce_recurring', $order->data['recurring_entity']);
+diff --git a/commerce_recurring.rules_defaults.inc b/commerce_recurring.rules_defaults.inc
+index d6dbc57..eeb8e40 100644
+--- a/commerce_recurring.rules_defaults.inc
++++ b/commerce_recurring.rules_defaults.inc
+@@ -60,6 +60,7 @@ function commerce_recurring_default_rules_configuration() {
+     'commerce_line_item:select' => 'current-line-item',
+     'fixed_price:select' => 'current-line-item:commerce-unit-price',
+     'quantity:select' => 'current-line-item:quantity',
++    'start_date:select' => 'site:current-date',
+   ));
+   $rule->action($loop);
+ 
+diff --git a/tests/commerce_recurring.test b/tests/commerce_recurring.test
+index 6808654..1050ebe 100644
+--- a/tests/commerce_recurring.test
++++ b/tests/commerce_recurring.test
+@@ -191,7 +191,8 @@ class CommerceRecurringTestCase extends CommerceBaseTestCase {
+   }
+ 
+   /**
+-   * When creating an order and finish a payment, recurring entity
++   * When creating an order and finish a payment, a recurring entity should be
++   * created.
+    */
+   function testCommerceRecurringEntityCreationWorkflow() {
+     // Login as a customer to proceed with the order.
+@@ -294,7 +295,7 @@ class CommerceRecurringTestCase extends CommerceBaseTestCase {
+       'customer_profile_billing[commerce_customer_address][und][0][postal_code]' => $address_info['postal_code'],
+     );
+     $this->drupalPost(NULL, $info, t('Continue to next step'));
+-    // Finish checkout process
++    // Finish checkout process.
+     $this->drupalPost(NULL, array('commerce_payment[payment_method]' => 'commerce_payment_example|commerce_payment_commerce_payment_example'), t('Continue to next step'));
+ 
+     // Load recurring entities.
